@@ -1367,7 +1367,7 @@ pub struct PipCompileArgs {
     #[arg(group = "sources", value_parser = parse_file_path, value_hint = ValueHint::FilePath)]
     pub src_file: Vec<PathBuf>,
 
-    /// Constrain versions using the given requirements files.
+    /// Constrain versions using the given requirements files or URLs.
     ///
     /// Constraints files are `requirements.txt`-like files that only control the _version_ of a
     /// requirement that's installed. However, including a package in a constraints file will _not_
@@ -1760,7 +1760,7 @@ pub struct PipSyncArgs {
     #[arg(required(true), value_parser = parse_file_path, value_hint = ValueHint::FilePath)]
     pub src_file: Vec<PathBuf>,
 
-    /// Constrain versions using the given requirements files.
+    /// Constrain versions using the given requirements files or URLs.
     ///
     /// Constraints files are `requirements.txt`-like files that only control the _version_ of a
     /// requirement that's installed. However, including a package in a constraints file will _not_
@@ -4222,14 +4222,17 @@ pub struct AddArgs {
     /// Constrain versions using the given requirements files.
     ///
     /// Constraints files are `requirements.txt`-like files that only control the _version_ of a
-    /// requirement that's installed. The constraints will _not_ be added to the project's
-    /// `pyproject.toml` file, but _will_ be respected during dependency resolution.
+    /// requirement that's installed. When used on their own, the constraints _will_ be imported
+    /// into `[tool.uv].constraint-dependencies` in `pyproject.toml`. When used _with_ packages or
+    /// `-r/--requirements`, the constraints _will_ be respected during dependency resolution but
+    /// _will not_ be added to the project's `pyproject.toml` file.
     ///
     /// This is equivalent to pip's `--constraint` option.
     #[arg(
         long,
         short,
         alias = "constraint",
+        group = "sources",
         env = EnvVars::UV_CONSTRAINT,
         value_delimiter = ' ',
         value_parser = parse_maybe_file_path,
