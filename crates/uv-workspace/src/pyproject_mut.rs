@@ -394,7 +394,7 @@ impl PyProjectTomlMut {
     /// Adds a constraint to `tool.uv.constraint-dependencies`.
     ///
     /// The requirement is written using uv's normalized requirement formatting instead of
-    /// preserving the exact original text from an input constraints file; hence, raw = false
+    /// preserving the exact original text from an input constraints file.
     ///
     /// Returns an [`ArrayEdit`] indicating whether the constraint was added or updated.
     pub fn add_constraint_dependency(&mut self, req: &Requirement) -> Result<ArrayEdit, Error> {

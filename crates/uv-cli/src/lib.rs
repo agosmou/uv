@@ -1367,7 +1367,7 @@ pub struct PipCompileArgs {
     #[arg(group = "sources", value_parser = parse_file_path, value_hint = ValueHint::FilePath)]
     pub src_file: Vec<PathBuf>,
 
-    /// Constrain versions using the given requirements files or URLs.
+    /// Constrain versions using the given requirements files.
     ///
     /// Constraints files are `requirements.txt`-like files that only control the _version_ of a
     /// requirement that's installed. However, including a package in a constraints file will _not_
@@ -1760,7 +1760,7 @@ pub struct PipSyncArgs {
     #[arg(required(true), value_parser = parse_file_path, value_hint = ValueHint::FilePath)]
     pub src_file: Vec<PathBuf>,
 
-    /// Constrain versions using the given requirements files or URLs.
+    /// Constrain versions using the given requirements files.
     ///
     /// Constraints files are `requirements.txt`-like files that only control the _version_ of a
     /// requirement that's installed. However, including a package in a constraints file will _not_
@@ -4219,7 +4219,7 @@ pub struct AddArgs {
     )]
     pub requirements: Vec<PathBuf>,
 
-    /// Constrain versions using the given requirements files.
+    /// Constrain versions using the given requirements files or URLs.
     ///
     /// Constraints files are `requirements.txt`-like files that only control the _version_ of a
     /// requirement that's installed. When used on their own, the constraints _will_ be imported
@@ -4227,7 +4227,8 @@ pub struct AddArgs {
     /// `-r/--requirements`, the constraints _will_ be respected during dependency resolution but
     /// _will not_ be added to the project's `pyproject.toml` file.
     ///
-    /// This is equivalent to pip's `--constraint` option.
+    /// When used with packages or `-r/--requirements`, this is equivalent to pip's `--constraint`
+    /// option.
     #[arg(
         long,
         short,

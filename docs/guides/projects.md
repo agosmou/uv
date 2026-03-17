@@ -156,6 +156,7 @@ resolution and are not added to `pyproject.toml`:
 
 ```console
 $ uv add fastapi -c constraints.txt
+$ uv add -r requirements.txt -c constraints.txt
 ```
 
 To remove a package, you can use `uv remove`:
