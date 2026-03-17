@@ -1119,7 +1119,7 @@ fn add_raw_error() -> Result<()> {
     ----- stderr -----
     error: the argument '--tag <TAG>' cannot be used with '--raw'
 
-    Usage: uv add --cache-dir [CACHE_DIR] --tag <TAG> --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>>
+    Usage: uv add --cache-dir [CACHE_DIR] --tag <TAG> --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>|--constraints <CONSTRAINTS>>
 
     For more information, try '--help'.
     ");
@@ -2362,7 +2362,7 @@ fn disallow_group_script_add() -> Result<()> {
     ----- stderr -----
     error: the argument '--group <GROUP>' cannot be used with '--script <SCRIPT>'
 
-    Usage: uv add --cache-dir [CACHE_DIR] --group <GROUP> --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>>
+    Usage: uv add --cache-dir [CACHE_DIR] --group <GROUP> --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>|--constraints <CONSTRAINTS>>
 
     For more information, try '--help'.
     ");
@@ -4595,7 +4595,7 @@ fn add_reject_multiple_git_ref_flags() {
     ----- stderr -----
     error: the argument '--tag <TAG>' cannot be used with '--branch <BRANCH>'
 
-    Usage: uv add --cache-dir [CACHE_DIR] --tag <TAG> --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>>
+    Usage: uv add --cache-dir [CACHE_DIR] --tag <TAG> --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>|--constraints <CONSTRAINTS>>
 
     For more information, try '--help'.
     "
@@ -4616,7 +4616,7 @@ fn add_reject_multiple_git_ref_flags() {
     ----- stderr -----
     error: the argument '--tag <TAG>' cannot be used with '--rev <REV>'
 
-    Usage: uv add --cache-dir [CACHE_DIR] --tag <TAG> --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>>
+    Usage: uv add --cache-dir [CACHE_DIR] --tag <TAG> --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>|--constraints <CONSTRAINTS>>
 
     For more information, try '--help'.
     "
@@ -4637,7 +4637,7 @@ fn add_reject_multiple_git_ref_flags() {
     ----- stderr -----
     error: the argument '--tag <TAG>' cannot be used multiple times
 
-    Usage: uv add [OPTIONS] <PACKAGES|--requirements <REQUIREMENTS>>
+    Usage: uv add [OPTIONS] <PACKAGES|--requirements <REQUIREMENTS>|--constraints <CONSTRAINTS>>
 
     For more information, try '--help'.
     "
@@ -5797,9 +5797,9 @@ fn add_requirements_file() -> Result<()> {
 
     ----- stderr -----
     error: the following required arguments were not provided:
-      <PACKAGES|--requirements <REQUIREMENTS>>
+      <PACKAGES|--requirements <REQUIREMENTS>|--constraints <CONSTRAINTS>>
 
-    Usage: uv add --cache-dir [CACHE_DIR] --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>>
+    Usage: uv add --cache-dir [CACHE_DIR] --exclude-newer <EXCLUDE_NEWER> <PACKAGES|--requirements <REQUIREMENTS>|--constraints <CONSTRAINTS>>
 
     For more information, try '--help'.
     ");
