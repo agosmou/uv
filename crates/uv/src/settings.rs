@@ -6,6 +6,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use rustc_hash::FxHashSet;
+use uv_audit::service::VulnerabilityServiceFormat;
+use uv_audit::types::VulnerabilityID;
 
 use crate::commands::{PythonUpgrade, PythonUpgradeSource};
 use uv_auth::Service;
@@ -13,12 +15,12 @@ use uv_cache::{CacheArgs, Refresh};
 use uv_cli::comma::CommaSeparatedRequirements;
 use uv_cli::{
     AddArgs, AuditArgs, AuthLoginArgs, AuthLogoutArgs, AuthTokenArgs, ColorChoice, ExternalCommand,
-    GlobalArgs, InitArgs, ListFormat, LockArgs, Maybe, PipCheckArgs, PipCompileArgs, PipFreezeArgs,
-    PipInstallArgs, PipListArgs, PipShowArgs, PipSyncArgs, PipTreeArgs, PipUninstallArgs,
-    PythonFindArgs, PythonInstallArgs, PythonListArgs, PythonListFormat, PythonPinArgs,
-    PythonUninstallArgs, PythonUpgradeArgs, RemoveArgs, RunArgs, SyncArgs, SyncFormat, ToolDirArgs,
-    ToolInstallArgs, ToolListArgs, ToolRunArgs, ToolUninstallArgs, TreeArgs, VenvArgs, VersionArgs,
-    VersionBumpSpec, VersionFormat,
+    GlobalArgs, InitArgs, ListFormat, LockArgs, Maybe, MetadataArgs, PipCheckArgs, PipCompileArgs,
+    PipFreezeArgs, PipInstallArgs, PipListArgs, PipShowArgs, PipSyncArgs, PipTreeArgs,
+    PipUninstallArgs, PythonFindArgs, PythonInstallArgs, PythonListArgs, PythonListFormat,
+    PythonPinArgs, PythonUninstallArgs, PythonUpgradeArgs, RemoveArgs, RunArgs, SyncArgs,
+    SyncFormat, ToolDirArgs, ToolInstallArgs, ToolListArgs, ToolRunArgs, ToolUninstallArgs,
+    TreeArgs, VenvArgs, VersionArgs, VersionBumpSpec, VersionFormat,
 };
 use uv_cli::{
     AuthorFrom, BuildArgs, ExportArgs, FormatArgs, PublishArgs, PythonDirArgs,
@@ -240,7 +242,7 @@ pub(crate) fn resolve_preview(
 pub(crate) struct NetworkSettings {
     pub(crate) connectivity: Connectivity,
     pub(crate) offline: Flag,
-    pub(crate) native_tls: bool,
+    pub(crate) system_certs: bool,
     pub(crate) http_proxy: Option<ProxyUrl>,
     pub(crate) https_proxy: Option<ProxyUrl>,
     pub(crate) no_proxy: Option<Vec<String>>,
@@ -251,6 +253,7 @@ pub(crate) struct NetworkSettings {
 }
 
 impl NetworkSettings {
+    #[allow(deprecated)]
     pub(crate) fn resolve(
         args: &GlobalArgs,
         workspace: Option<&FilesystemOptions>,
@@ -283,18 +286,33 @@ impl NetworkSettings {
         } else {
             Connectivity::Online
         };
-        let native_tls = match flag(args.native_tls, args.no_native_tls, "native-tls") {
-            Some(value) => value,
-            None => {
-                if environment.native_tls.value == Some(true) {
-                    true
-                } else {
-                    workspace
-                        .and_then(|workspace| workspace.globals.native_tls)
-                        .unwrap_or(false)
-                }
-            }
-        };
+
+        // Resolve whether to use system certificates.
+        //
+        // `--native-tls` is a legacy alias for `--system-certs` — it enables system certificates
+        // but does NOT change the TLS backend. Any explicit CLI setting should take precedence
+        // over environment variables and workspace configuration, regardless of which spelling is
+        // used.
+        let system_certs =
+            if let Some(value) = flag(args.system_certs, args.no_system_certs, "system-certs") {
+                value
+            } else if let Some(value) = flag(args.native_tls, args.no_native_tls, "native-tls") {
+                value
+            } else if let Some(true) = environment.system_certs.value {
+                true
+            } else if let Some(true) = environment.native_tls.value {
+                true
+            } else {
+                workspace
+                    .and_then(|workspace| {
+                        workspace
+                            .globals
+                            .system_certs
+                            .or(workspace.globals.native_tls)
+                    })
+                    .unwrap_or(false)
+            };
+
         let allow_insecure_host = args
             .allow_insecure_host
             .as_ref()
@@ -319,7 +337,7 @@ impl NetworkSettings {
         Self {
             connectivity,
             offline,
-            native_tls,
+            system_certs,
             http_proxy,
             https_proxy,
             no_proxy,
@@ -1779,6 +1797,60 @@ impl LockSettings {
         }
     }
 }
+/// The resolved settings to use for a `lock` invocation.
+#[derive(Debug, Clone)]
+pub(crate) struct MetadataSettings {
+    pub(crate) lock_check: LockCheck,
+    pub(crate) frozen: Option<FrozenSource>,
+    pub(crate) dry_run: DryRun,
+    pub(crate) python: Option<String>,
+    pub(crate) install_mirrors: PythonInstallMirrors,
+    pub(crate) refresh: Refresh,
+    pub(crate) settings: ResolverSettings,
+}
+
+impl MetadataSettings {
+    /// Resolve the [`LockSettings`] from the CLI and filesystem configuration.
+    pub(crate) fn resolve(
+        args: Box<MetadataArgs>,
+        filesystem: Option<FilesystemOptions>,
+        environment: EnvironmentOptions,
+    ) -> Self {
+        let MetadataArgs {
+            locked,
+            frozen,
+            dry_run,
+            resolver,
+            build,
+            refresh,
+            python,
+        } = *args;
+
+        let filesystem_install_mirrors = filesystem
+            .clone()
+            .map(|fs| fs.install_mirrors.clone())
+            .unwrap_or_default();
+
+        // Resolve flags from CLI and environment variables.
+        let locked = resolve_flag(locked, "locked", environment.locked);
+        let frozen = resolve_flag(frozen, "frozen", environment.frozen);
+
+        // Check for conflicts between locked and frozen.
+        check_conflicts(locked, frozen);
+
+        Self {
+            lock_check: resolve_lock_check(locked),
+            frozen: resolve_frozen(frozen),
+            dry_run: DryRun::from_args(dry_run),
+            python: python.and_then(Maybe::into_option),
+            refresh: Refresh::from(refresh),
+            settings: ResolverSettings::combine(resolver_options(resolver, build), filesystem),
+            install_mirrors: environment
+                .install_mirrors
+                .combine(filesystem_install_mirrors),
+        }
+    }
+}
 
 /// The resolved settings to use for a `add` invocation.
 #[expect(clippy::struct_excessive_bools)]
@@ -2477,6 +2549,10 @@ pub(crate) struct AuditSettings {
     pub(crate) python_platform: Option<TargetTriple>,
     pub(crate) install_mirrors: PythonInstallMirrors,
     pub(crate) settings: ResolverSettings,
+    pub(crate) service_format: VulnerabilityServiceFormat,
+    pub(crate) service_url: Option<String>,
+    pub(crate) ignore: Vec<VulnerabilityID>,
+    pub(crate) ignore_until_fixed: Vec<VulnerabilityID>,
 }
 
 impl AuditSettings {
@@ -2487,17 +2563,11 @@ impl AuditSettings {
         environment: EnvironmentOptions,
     ) -> Self {
         let AuditArgs {
-            extra,
-            all_extras,
             no_extra,
-            no_all_extras,
-            dev,
             no_dev,
-            group,
             no_group,
             no_default_groups,
             only_group,
-            all_groups,
             only_dev,
             script: _,
             python_version,
@@ -2506,6 +2576,10 @@ impl AuditSettings {
             frozen,
             build,
             resolver,
+            ignore,
+            ignore_until_fixed,
+            service_format,
+            service_url,
         } = args;
 
         let filesystem_install_mirrors = filesystem
@@ -2513,7 +2587,11 @@ impl AuditSettings {
             .map(|fs| fs.install_mirrors.clone())
             .unwrap_or_default();
 
-        let dev = dev || environment.dev.value == Some(true);
+        let filesystem_audit = filesystem
+            .as_ref()
+            .and_then(|fs| fs.audit.clone())
+            .unwrap_or_default();
+
         let no_dev = no_dev || environment.no_dev.value == Some(true);
 
         // Resolve flags from CLI and environment variables.
@@ -2525,23 +2603,23 @@ impl AuditSettings {
 
         Self {
             extras: ExtrasSpecification::from_args(
-                extra.unwrap_or_default(),
+                vec![],
                 no_extra,
                 // TODO(ww): support no_default_extras?
                 false,
                 // TODO(ww): support only_extra?
                 vec![],
-                flag(all_extras, no_all_extras, "all-extras").unwrap_or_default(),
+                true,
             ),
             groups: DependencyGroups::from_args(
-                dev,
+                only_group.is_empty() && !only_dev,
                 no_dev,
                 only_dev,
-                group,
+                vec![],
                 no_group,
                 no_default_groups,
-                only_group,
-                all_groups,
+                only_group.clone(),
+                only_group.is_empty() && !only_dev,
             ),
             lock_check: resolve_lock_check(locked),
             frozen: resolve_frozen(frozen),
@@ -2551,6 +2629,21 @@ impl AuditSettings {
                 .install_mirrors
                 .combine(filesystem_install_mirrors),
             settings: ResolverSettings::combine(resolver_options(resolver, build), filesystem),
+            service_format,
+            service_url,
+            ignore: {
+                let config_ignore = filesystem_audit.ignore.unwrap_or_default();
+                let mut merged = ignore;
+                merged.extend(config_ignore);
+                merged.into_iter().map(VulnerabilityID::new).collect()
+            },
+            ignore_until_fixed: {
+                let config_ignore_until_fixed =
+                    filesystem_audit.ignore_until_fixed.unwrap_or_default();
+                let mut merged = ignore_until_fixed;
+                merged.extend(config_ignore_until_fixed);
+                merged.into_iter().map(VulnerabilityID::new).collect()
+            },
         }
     }
 }

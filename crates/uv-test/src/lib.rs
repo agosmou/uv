@@ -130,6 +130,8 @@ pub const INSTA_FILTERS: &[(&str, &str)] = &[
     ),
     // Trim end-of-line whitespaces, to allow removing them on save.
     (r"([^\s])[ \t]+(\r?\n)", "$1$2"),
+    // Filter SSL certificate loading debug messages (environment-dependent)
+    (r"DEBUG Loaded \d+ certificate\(s\) from [^\n]+\n", ""),
 ];
 
 /// Create a context for tests which simplifies shared behavior across tests.
@@ -576,6 +578,16 @@ impl TestContext {
         self.filters.push((
             r"compiled \d+ files".to_string(),
             "compiled [COUNT] files".to_string(),
+        ));
+        self
+    }
+
+    /// Add a (not context aware) filter for the current uv version `v<major>.<minor>.<patch>`
+    #[must_use]
+    pub fn with_filtered_current_version(mut self) -> Self {
+        self.filters.push((
+            regex::escape(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+            "v[CURRENT_VERSION]".to_string(),
         ));
         self
     }
@@ -1379,6 +1391,14 @@ impl TestContext {
         command
     }
 
+    /// Create a `uv audit` command with options shared across scenarios.
+    pub fn audit(&self) -> Command {
+        let mut command = self.new_command();
+        command.arg("audit");
+        self.add_shared_options(&mut command, false);
+        command
+    }
+
     /// Create a `uv workspace metadata` command with options shared across scenarios.
     pub fn workspace_metadata(&self) -> Command {
         let mut command = self.new_command();
@@ -1954,6 +1974,7 @@ impl TestContext {
             EnvVars::SSL_CERT_DIR,
             EnvVars::SSL_CERT_FILE,
             EnvVars::UV_NATIVE_TLS,
+            EnvVars::UV_SYSTEM_CERTS,
         ];
 
         for env_var in EnvVars::all_names()

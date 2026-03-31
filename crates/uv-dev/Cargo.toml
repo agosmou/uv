@@ -1,6 +1,6 @@
 [package]
 name = "uv-dev"
-version = "0.0.30"
+version = "0.0.35"
 description = "This is an internal component crate of uv"
 publish = false
 
@@ -64,6 +64,7 @@ walkdir = { workspace = true }
 
 [lib]
 name = "uv_dev"
+doctest = false
 
 [[bin]]
 name = "uv-dev"

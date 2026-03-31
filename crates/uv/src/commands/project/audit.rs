@@ -19,15 +19,14 @@ use crate::settings::{FrozenSource, LockCheck, ResolverSettings};
 
 use anyhow::Result;
 use tracing::trace;
-use uv_audit::service::osv;
-use uv_audit::types::{Dependency, Finding};
+use uv_audit::service::{VulnerabilityServiceFormat, osv};
+use uv_audit::types::{Dependency, Finding, VulnerabilityID};
 use uv_cache::Cache;
 use uv_client::BaseClientBuilder;
 use uv_configuration::{Concurrency, DependencyGroups, ExtrasSpecification, TargetTriple};
 use uv_normalize::{DefaultExtras, DefaultGroups};
 use uv_preview::{Preview, PreviewFeature};
 use uv_python::{PythonDownloads, PythonPreference, PythonVersion};
-use uv_redacted::DisplaySafeUrl;
 use uv_scripts::Pep723Script;
 use uv_settings::PythonInstallMirrors;
 use uv_warnings::warn_user;
@@ -52,6 +51,10 @@ pub(crate) async fn audit(
     cache: Cache,
     printer: Printer,
     preview: Preview,
+    service: VulnerabilityServiceFormat,
+    service_url: Option<String>,
+    ignore: Vec<VulnerabilityID>,
+    ignore_until_fixed: Vec<VulnerabilityID>,
 ) -> Result<ExitStatus> {
     // Check if the audit feature is in preview
     if !preview.is_enabled(PreviewFeature::Audit) {
@@ -81,10 +84,10 @@ pub(crate) async fn audit(
 
     // Determine the extras to include.
     let default_extras = match &target {
-        LockTarget::Workspace(_) => DefaultExtras::default(),
-        LockTarget::Script(_) => DefaultExtras::default(),
+        LockTarget::Workspace(_) => DefaultExtras::All,
+        LockTarget::Script(_) => DefaultExtras::All,
     };
-    let _extras = extras.with_defaults(default_extras);
+    let extras = extras.with_defaults(default_extras);
 
     // Determine whether we're performing a universal audit.
     let universal = python_version.is_none() && python_platform.is_none();
@@ -166,9 +169,11 @@ pub(crate) async fn audit(
     {
         Ok(result) => result.into_lock(),
         Err(ProjectError::Operation(err)) => {
-            return diagnostics::OperationDiagnostic::native_tls(client_builder.is_native_tls())
-                .report(err)
-                .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+            return diagnostics::OperationDiagnostic::with_system_certs(
+                client_builder.system_certs(),
+            )
+            .report(err)
+            .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
         }
         Err(err) => return Err(err.into()),
     };
@@ -182,67 +187,63 @@ pub(crate) async fn audit(
         )
     });
 
-    // TODO: validate the sets of requested extras/groups against the lockfile?
-
-    // Build the list of auditable packages, skipping workspace members. Workspace members are
-    // local by definition and have no meaningful external package identity to look up in a vuln
-    // service. We also skip packages without a version, since we can't query for them.
-    //
-    // This mirrors the logic in `TreeDisplay::new`: for single-member workspaces, `lock.members()`
-    // is empty and the root package (source at path "") is the implicit member.
-    let workspace_root_name = lock.root().map(uv_resolver::Package::name);
-    let auditable: Vec<_> = lock
-        .packages()
-        .iter()
-        .filter(|p| {
-            if lock.members().is_empty() {
-                // Single-member workspace: skip the implicit root.
-                workspace_root_name != Some(p.name())
-            } else {
-                !lock.members().contains(p.name())
-            }
-        })
-        .filter_map(|p| {
-            let Some(version) = p.version() else {
-                trace!(
-                    "Skipping audit for {} because it has no version information",
-                    p.name()
-                );
-                return None;
-            };
-            Some((p.name(), version))
-        })
-        .collect();
+    // Build the list of auditable packages by traversing the lockfile from workspace roots,
+    // respecting the user's extras and dependency-group filters. Workspace members are excluded
+    // (they are local and have no external package identity), as are packages without a version.
+    let auditable = lock.packages_for_audit(&extras, &groups);
 
     // Perform the audit.
-    let base_client = client_builder.build();
-    let osv_url =
-        DisplaySafeUrl::parse(osv::API_BASE).expect("impossible: embedded URL is invalid");
-    let service = osv::Osv::new(
-        base_client.for_host(&osv_url).raw_client().clone(),
-        None,
-        concurrency,
-    );
-    trace!("Auditing {n} dependencies against OSV", n = auditable.len());
-
     let reporter = AuditReporter::from(printer);
-
     let dependencies: Vec<Dependency> = auditable
         .iter()
         .map(|(name, version)| Dependency::new((*name).clone(), (*version).clone()))
         .collect();
-    let all_findings = service.query_batch(&dependencies).await?;
+    let base_client = client_builder.build();
+    let all_findings = {
+        match service {
+            VulnerabilityServiceFormat::Osv => {
+                let osv_url = service_url
+                    .as_deref()
+                    .unwrap_or(osv::API_BASE)
+                    .parse()
+                    .expect("invalid OSV service URL");
+                let client = base_client.for_host(&osv_url).raw_client().clone();
+                let service = osv::Osv::new(client, Some(osv_url), concurrency);
+                trace!("Auditing {n} dependencies against OSV", n = auditable.len());
+                service.query_batch(&dependencies).await?
+            }
+        }
+    };
 
     reporter.on_audit_complete();
+
+    // Filter out ignored vulnerabilities.
+    let all_findings: Vec<_> = all_findings
+        .into_iter()
+        .filter(|finding| match finding {
+            Finding::Vulnerability(vulnerability) => {
+                if ignore.iter().any(|id| vulnerability.matches(id)) {
+                    return false;
+                }
+                if vulnerability.fix_versions.is_empty()
+                    && ignore_until_fixed
+                        .iter()
+                        .any(|id| vulnerability.matches(id))
+                {
+                    return false;
+                }
+                true
+            }
+            Finding::ProjectStatus(_) => true,
+        })
+        .collect();
 
     let display = AuditResults {
         printer,
         n_packages: auditable.len(),
         findings: all_findings,
     };
-    display.render()?;
-
-    Ok(ExitStatus::Success)
+    display.render()
 }
 
 struct AuditResults {
@@ -252,7 +253,7 @@ struct AuditResults {
 }
 
 impl AuditResults {
-    fn render(&self) -> Result<()> {
+    fn render(&self) -> Result<ExitStatus> {
         let (vulns, statuses): (Vec<_>, Vec<_>) =
             self.findings.iter().partition_map(|finding| match finding {
                 Finding::Vulnerability(vuln) => itertools::Either::Left(vuln),
@@ -282,8 +283,19 @@ impl AuditResults {
         writeln!(
             self.printer.stderr(),
             "Found {vuln_banner} and {status_banner} in {packages}",
-            packages = format!("{npackages} packages", npackages = self.n_packages).bold()
+            packages = format!(
+                "{npackages} {label}",
+                npackages = self.n_packages,
+                label = if self.n_packages == 1 {
+                    "package"
+                } else {
+                    "packages"
+                }
+            )
+            .bold()
         )?;
+
+        let has_findings = !vulns.is_empty() || !statuses.is_empty();
 
         if !vulns.is_empty() {
             writeln!(self.printer.stdout_important(), "\nVulnerabilities:\n")?;
@@ -338,8 +350,6 @@ impl AuditResults {
                         )?;
                     }
                 }
-
-                writeln!(self.printer.stdout_important())?;
             }
         }
 
@@ -350,6 +360,10 @@ impl AuditResults {
             // any adverse project statuses at the moment.
         }
 
-        Ok(())
+        if has_findings {
+            Ok(ExitStatus::Failure)
+        } else {
+            Ok(ExitStatus::Success)
+        }
     }
 }

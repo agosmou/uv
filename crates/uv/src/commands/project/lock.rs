@@ -253,12 +253,14 @@ pub(crate) async fn lock(
 
             Ok(ExitStatus::Success)
         }
+        // Lock mismatches from `--check`/`--locked` are expected validation failures.
+        // Handle them here so we return exit code 1 instead of bubbling up as an error (exit code 2).
         Err(err @ ProjectError::LockMismatch(..)) => {
             writeln!(printer.stderr(), "{}", err.to_string().bold())?;
             Ok(ExitStatus::Failure)
         }
         Err(ProjectError::Operation(err)) => {
-            diagnostics::OperationDiagnostic::native_tls(client_builder.is_native_tls())
+            diagnostics::OperationDiagnostic::with_system_certs(client_builder.system_certs())
                 .report(err)
                 .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()))
         }
@@ -267,7 +269,7 @@ pub(crate) async fn lock(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum LockMode<'env> {
+pub(crate) enum LockMode<'env> {
     /// Write the lockfile to disk.
     Write(&'env Interpreter),
     /// Perform a resolution, but don't write the lockfile to disk.
@@ -279,7 +281,7 @@ pub(super) enum LockMode<'env> {
 }
 
 /// A lock operation.
-pub(super) struct LockOperation<'env> {
+pub(crate) struct LockOperation<'env> {
     mode: LockMode<'env>,
     constraints: Vec<NameRequirementSpecification>,
     refresh: Option<&'env Refresh>,
@@ -296,7 +298,7 @@ pub(super) struct LockOperation<'env> {
 
 impl<'env> LockOperation<'env> {
     /// Initialize a [`LockOperation`].
-    pub(super) fn new(
+    pub(crate) fn new(
         mode: LockMode<'env>,
         settings: &'env ResolverSettings,
         client_builder: &'env BaseClientBuilder<'env>,
@@ -326,7 +328,7 @@ impl<'env> LockOperation<'env> {
 
     /// Set the external constraints for the [`LockOperation`].
     #[must_use]
-    pub(super) fn with_constraints(
+    pub(crate) fn with_constraints(
         mut self,
         constraints: Vec<NameRequirementSpecification>,
     ) -> Self {
@@ -336,13 +338,13 @@ impl<'env> LockOperation<'env> {
 
     /// Set the refresh strategy for the [`LockOperation`].
     #[must_use]
-    pub(super) fn with_refresh(mut self, refresh: &'env Refresh) -> Self {
+    pub(crate) fn with_refresh(mut self, refresh: &'env Refresh) -> Self {
         self.refresh = Some(refresh);
         self
     }
 
     /// Perform a [`LockOperation`].
-    pub(super) async fn execute(self, target: LockTarget<'_>) -> Result<LockResult, ProjectError> {
+    pub(crate) async fn execute(self, target: LockTarget<'_>) -> Result<LockResult, ProjectError> {
         match self.mode {
             LockMode::Frozen(source) => {
                 // Read the existing lockfile, but don't attempt to lock the project.
@@ -715,6 +717,16 @@ async fn do_lock(
         }
     };
 
+    let lock_supported_environments = environments.cloned().unwrap_or_default();
+    let lock_required_environments = required_environments.cloned().unwrap_or_default();
+    let artifact_environments = SupportedEnvironments::from_markers(
+        lock_supported_environments
+            .iter()
+            .copied()
+            .chain(lock_required_environments.iter().copied())
+            .collect(),
+    );
+
     let options = OptionsBuilder::new()
         .resolution_mode(*resolution)
         .prerelease_mode(*prerelease)
@@ -722,7 +734,7 @@ async fn do_lock(
         .exclude_newer(exclude_newer.clone())
         .index_strategy(*index_strategy)
         .build_options(build_options.clone())
-        .required_environments(required_environments.cloned().unwrap_or_default())
+        .artifact_environments(artifact_environments.clone())
         .build();
     let hasher = HashStrategy::Generate(HashGeneration::Url);
 
@@ -978,19 +990,11 @@ async fn do_lock(
             let lock = Lock::from_resolution(
                 &resolution,
                 target.install_path(),
-                environments
-                    .cloned()
-                    .map(SupportedEnvironments::into_markers)
-                    .unwrap_or_default(),
+                lock_supported_environments.clone().into_markers(),
             )?
             .with_manifest(manifest)
             .with_conflicts(conflicts)
-            .with_required_environments(
-                required_environments
-                    .cloned()
-                    .map(SupportedEnvironments::into_markers)
-                    .unwrap_or_default(),
-            );
+            .with_required_environments(lock_required_environments.into_markers());
 
             if previous.as_ref().is_some_and(|previous| *previous == lock) {
                 Ok(LockResult::Unchanged(lock))

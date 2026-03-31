@@ -17,6 +17,7 @@ use uv_pypi_types::ConflictItem;
 
 use crate::graph_ops::{Reachable, marker_reachability};
 use crate::lock::LockErrorKind;
+pub use crate::lock::export::metadata::Metadata;
 pub(crate) use crate::lock::export::pylock_toml::PylockTomlPackage;
 pub use crate::lock::export::pylock_toml::{PylockToml, PylockTomlErrorKind};
 pub use crate::lock::export::requirements_txt::RequirementsTxtExport;
@@ -24,6 +25,7 @@ use crate::universal_marker::resolve_conflicts;
 use crate::{Installable, LockError, Package};
 
 pub mod cyclonedx_json;
+mod metadata;
 mod pylock_toml;
 mod requirements_txt;
 
@@ -84,12 +86,22 @@ impl<'lock> ExportableRequirements<'lock> {
                     name: root_name.clone(),
                 })?;
 
+            // Track the activated package in the list of known conflicts.
+            if let Some(conflicts) = conflicts.as_mut() {
+                conflicts.insert(ConflictItem::from(dist.id.name.clone()), MarkerTree::TRUE);
+            }
+
             if groups.prod() {
                 // Add the workspace package to the graph.
                 let index = *inverse
                     .entry(&dist.id)
                     .or_insert_with(|| graph.add_node(Node::Package(dist)));
                 graph.add_edge(root, index, Edge::Prod(MarkerTree::TRUE));
+
+                // Track the activated project in the list of known conflicts.
+                if let Some(conflicts) = conflicts.as_mut() {
+                    conflicts.insert(ConflictItem::from(dist.id.name.clone()), MarkerTree::TRUE);
+                }
 
                 // Push its dependencies on the queue.
                 queue.push_back((dist, None));

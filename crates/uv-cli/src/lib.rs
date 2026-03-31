@@ -11,6 +11,7 @@ use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 use clap::{ValueEnum, ValueHint};
 
+use uv_audit::service::VulnerabilityServiceFormat;
 use uv_auth::Service;
 use uv_cache::CacheArgs;
 use uv_configuration::{
@@ -235,20 +236,32 @@ pub struct GlobalArgs {
     )]
     pub color: Option<ColorChoice>,
 
-    /// Whether to load TLS certificates from the platform's native store [env: UV_NATIVE_TLS=]
+    /// Whether to load TLS certificates from the platform's native certificate store [env:
+    /// UV_NATIVE_TLS=]
     ///
-    /// By default, uv loads certificates from the bundled `webpki-roots` crate. The
-    /// `webpki-roots` are a reliable set of trust roots from Mozilla, and including them in uv
-    /// improves portability and performance (especially on macOS).
+    /// By default, uv uses bundled Mozilla root certificates. When enabled, this flag loads
+    /// certificates from the platform's native certificate store instead.
+    ///
+    /// This is equivalent to `--system-certs`.
+    #[arg(global = true, long, value_parser = clap::builder::BoolishValueParser::new(), overrides_with_all = ["no_native_tls", "system_certs", "no_system_certs"], hide = true)]
+    pub native_tls: bool,
+
+    #[arg(global = true, long, overrides_with_all = ["native_tls", "system_certs", "no_system_certs"], hide = true)]
+    pub no_native_tls: bool,
+
+    /// Whether to load TLS certificates from the platform's native certificate store [env: UV_SYSTEM_CERTS=]
+    ///
+    /// By default, uv uses bundled Mozilla root certificates, which improves portability and
+    /// performance (especially on macOS).
     ///
     /// However, in some cases, you may want to use the platform's native certificate store,
     /// especially if you're relying on a corporate trust root (e.g., for a mandatory proxy) that's
     /// included in your system's certificate store.
-    #[arg(global = true, long, value_parser = clap::builder::BoolishValueParser::new(), overrides_with("no_native_tls"))]
-    pub native_tls: bool,
+    #[arg(global = true, long, value_parser = clap::builder::BoolishValueParser::new(), overrides_with_all = ["no_system_certs", "native_tls", "no_native_tls"])]
+    pub system_certs: bool,
 
-    #[arg(global = true, long, overrides_with("native_tls"), hide = true)]
-    pub no_native_tls: bool,
+    #[arg(global = true, long, overrides_with_all = ["system_certs", "native_tls", "no_native_tls"], hide = true)]
+    pub no_system_certs: bool,
 
     /// Disable network access [env: UV_OFFLINE=]
     ///
@@ -1182,10 +1195,15 @@ pub enum ProjectCommand {
         after_long_help = ""
     )]
     Format(FormatArgs),
-    /// Audit the project's lockfile for known vulnerabilities and unmaintained dependencies.
+    /// Audit the project's dependencies.
+    ///
+    /// Dependencies are audited for known vulnerabilities, as well as 'adverse' statuses such as
+    /// deprecation and quarantine.
+    ///
+    /// By default, all extras and groups within the project are audited. To exclude extras
+    /// and/or groups from the audit, use the `--no-extra`, `--no-group`, and related
+    /// options.
     #[command(
-        // NOTE: Hidden while in development.
-        hide = true,
         after_help = "Use `uv help audit` for more details.",
         after_long_help = ""
     )]
@@ -1683,7 +1701,7 @@ pub struct PipCompileArgs {
 
     /// Specify a package to omit from the output resolution. Its dependencies will still be
     /// included in the resolution. Equivalent to pip-compile's `--unsafe-package` option.
-    #[arg(long, alias = "unsafe-package", value_hint = ValueHint::Other)]
+    #[arg(long, alias = "unsafe-package", value_delimiter = ',', value_hint = ValueHint::Other)]
     pub no_emit_package: Option<Vec<PackageName>>,
 
     /// Include `--index-url` and `--extra-index-url` entries in the generated output file.
@@ -5003,6 +5021,7 @@ pub struct ExportArgs {
         long,
         alias = "no-install-package",
         conflicts_with = "only_emit_package",
+        value_delimiter = ',',
         value_hint = ValueHint::Other,
     )]
     pub no_emit_package: Vec<PackageName>,
@@ -5013,6 +5032,7 @@ pub struct ExportArgs {
         alias = "only-install-package",
         conflicts_with = "no_emit_package",
         hide = true,
+        value_delimiter = ',',
         value_hint = ValueHint::Other,
     )]
     pub only_emit_package: Vec<PackageName>,
@@ -5126,100 +5146,45 @@ pub struct FormatArgs {
 
 #[derive(Args)]
 pub struct AuditArgs {
-    /// Include optional dependencies from the specified extra name.
-    ///
-    /// May be provided more than once.
-    ///
-    /// This option is only available when running in a project.
-    #[arg(
-        long,
-        conflicts_with = "all_extras",
-        conflicts_with = "only_group",
-        value_delimiter = ',',
-        value_parser = extra_name_with_clap_error,
-        value_hint = ValueHint::Other,
-    )]
-    pub extra: Option<Vec<ExtraName>>,
-
-    /// Include all optional dependencies.
-    ///
-    /// Optional dependencies are defined via `project.optional-dependencies` in a `pyproject.toml`.
-    ///
-    /// This option is only available when running in a project.
-    #[arg(long, conflicts_with = "extra", conflicts_with = "only_group")]
-    pub all_extras: bool,
-
-    /// Exclude the specified optional dependencies, if `--all-extras` is supplied.
+    /// Don't audit the specified optional dependencies.
     ///
     /// May be provided multiple times.
     #[arg(long, value_hint = ValueHint::Other)]
     pub no_extra: Vec<ExtraName>,
 
-    #[arg(long, overrides_with("all_extras"), hide = true)]
-    pub no_all_extras: bool,
-
-    /// Include the development dependency group [env: UV_DEV=]
-    ///
-    /// Development dependencies are defined via `dependency-groups.dev` or
-    /// `tool.uv.dev-dependencies` in a `pyproject.toml`.
-    ///
-    /// This option is an alias for `--group dev`.
-    ///
-    /// This option is only available when running in a project.
-    #[arg(long, overrides_with("no_dev"), hide = true, value_parser = clap::builder::BoolishValueParser::new())]
-    pub dev: bool,
-
-    /// Disable the development dependency group [env: UV_NO_DEV=]
+    /// Don't audit the development dependency group [env: UV_NO_DEV=]
     ///
     /// This option is an alias of `--no-group dev`.
-    /// See `--no-default-groups` to disable all default groups instead.
+    /// See `--no-default-groups` to exclude all default groups instead.
     ///
     /// This option is only available when running in a project.
-    #[arg(long, overrides_with("dev"), value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
     pub no_dev: bool,
 
-    /// Include dependencies from the specified dependency group.
-    ///
-    /// May be provided multiple times.
-    #[arg(long, conflicts_with_all = ["only_group", "only_dev"], value_hint = ValueHint::Other)]
-    pub group: Vec<GroupName>,
-
-    /// Disable the specified dependency group.
-    ///
-    /// This option always takes precedence over default groups,
-    /// `--all-groups`, and `--group`.
+    /// Don't audit the specified dependency group.
     ///
     /// May be provided multiple times.
     #[arg(long, env = EnvVars::UV_NO_GROUP, value_delimiter = ' ', value_hint = ValueHint::Other)]
     pub no_group: Vec<GroupName>,
 
-    /// Ignore the default dependency groups.
-    ///
-    /// uv includes the groups defined in `tool.uv.default-groups` by default.
-    /// This disables that option, however, specific groups can still be included with `--group`.
+    /// Don't audit the default dependency groups.
     #[arg(long, env = EnvVars::UV_NO_DEFAULT_GROUPS, value_parser = clap::builder::BoolishValueParser::new())]
     pub no_default_groups: bool,
 
-    /// Only include dependencies from the specified dependency group.
+    /// Only audit dependencies from the specified dependency group.
     ///
     /// The project and its dependencies will be omitted.
     ///
     /// May be provided multiple times. Implies `--no-default-groups`.
-    #[arg(long, conflicts_with_all = ["group", "dev", "all_groups"], value_hint = ValueHint::Other)]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub only_group: Vec<GroupName>,
 
-    /// Include dependencies from all dependency groups.
-    ///
-    /// `--no-group` can be used to exclude specific groups.
-    #[arg(long, conflicts_with_all = ["only_group", "only_dev"])]
-    pub all_groups: bool,
-
-    /// Only include the development dependency group.
+    /// Only audit the development dependency group.
     ///
     /// The project and its dependencies will be omitted.
     ///
     /// This option is an alias for `--only-group dev`. Implies `--no-default-groups`.
-    #[arg(long, conflicts_with_all = ["group", "all_groups", "no_dev"])]
+    #[arg(long, conflicts_with_all = ["no_dev"])]
     pub only_dev: bool,
 
     /// Assert that the `uv.lock` will remain unchanged [env: UV_LOCKED=]
@@ -5268,6 +5233,43 @@ pub struct AuditArgs {
     /// `aarch64-apple-darwin`.
     #[arg(long)]
     pub python_platform: Option<TargetTriple>,
+
+    /// Ignore a vulnerability by ID.
+    ///
+    /// Vulnerabilities matching any of the provided IDs (including aliases) will be excluded from
+    /// the audit results.
+    ///
+    /// May be provided multiple times.
+    #[arg(long)]
+    pub ignore: Vec<String>,
+
+    /// Ignore a vulnerability by ID, but only while no fix is available.
+    ///
+    /// Vulnerabilities matching any of the provided IDs (including aliases) will be excluded from
+    /// the audit results as long as they have no known fix versions. Once a fix version becomes
+    /// available, the vulnerability will be reported again.
+    ///
+    /// May be provided multiple times.
+    #[arg(long)]
+    pub ignore_until_fixed: Vec<String>,
+
+    /// The service format to use for vulnerability lookups.
+    ///
+    /// Each service format has a default URL, which can be
+    /// changed with `--service-url`. The defaults are:
+    ///
+    /// * OSV: <https://api.osv.dev/>
+    #[arg(long, value_enum, default_value = "osv")]
+    pub service_format: VulnerabilityServiceFormat,
+
+    /// The URL to vulnerability service API endpoint.
+    ///
+    /// If not provided, the default URL for the selected service will be used.
+    ///
+    /// The service needs to use the OSV protocol, unless a different
+    /// format was requested by `--service-format`.
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub service_url: Option<String>,
 }
 
 #[derive(Args)]
@@ -7905,7 +7907,7 @@ pub enum WorkspaceCommand {
     /// View metadata about the current workspace.
     ///
     /// The output of this command is not yet stable.
-    Metadata(MetadataArgs),
+    Metadata(Box<MetadataArgs>),
     /// Display the path of a workspace member.
     ///
     /// By default, the path to the workspace root directory is displayed.
@@ -7919,9 +7921,55 @@ pub enum WorkspaceCommand {
     #[command(hide = true)]
     List(WorkspaceListArgs),
 }
+#[derive(Args)]
+pub struct MetadataArgs {
+    /// Check if the lockfile is up-to-date [env: UV_LOCKED=]
+    ///
+    /// Asserts that the `uv.lock` would remain unchanged after a resolution. If the lockfile is
+    /// missing or needs to be updated, uv will exit with an error.
+    #[arg(long, conflicts_with_all = ["frozen", "upgrade"])]
+    pub locked: bool,
 
-#[derive(Args, Debug)]
-pub struct MetadataArgs;
+    /// Assert that a `uv.lock` exists without checking if it is up-to-date [env: UV_FROZEN=]
+    #[arg(long, conflicts_with_all = ["locked"])]
+    pub frozen: bool,
+
+    /// Perform a dry run, without writing the lockfile.
+    ///
+    /// In dry-run mode, uv will resolve the project's dependencies and report on the resulting
+    /// changes, but will not write the lockfile to disk.
+    #[arg(long, conflicts_with = "frozen", conflicts_with = "locked")]
+    pub dry_run: bool,
+
+    #[command(flatten)]
+    pub resolver: ResolverArgs,
+
+    #[command(flatten)]
+    pub build: BuildOptionsArgs,
+
+    #[command(flatten)]
+    pub refresh: RefreshArgs,
+
+    /// The Python interpreter to use during resolution.
+    ///
+    /// A Python interpreter is required for building source distributions to determine package
+    /// metadata when there are not wheels.
+    ///
+    /// The interpreter is also used as the fallback value for the minimum Python version if
+    /// `requires-python` is not set.
+    ///
+    /// See `uv help python` for details on Python discovery and supported request formats.
+    #[arg(
+        long,
+        short,
+        env = EnvVars::UV_PYTHON,
+        verbatim_doc_comment,
+        help_heading = "Python options",
+        value_parser = parse_maybe_string,
+        value_hint = ValueHint::Other,
+    )]
+    pub python: Option<Maybe<String>>,
+}
 
 #[derive(Args, Debug)]
 pub struct WorkspaceDirArgs {

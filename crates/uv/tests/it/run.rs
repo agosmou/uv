@@ -6474,10 +6474,7 @@ fn run_only_group_and_extra_conflict() -> Result<()> {
     Ok(())
 }
 
-/// Test that `--preview-features target-workspace-discovery` discovers the workspace
-/// from the target's directory rather than the current working directory.
-#[test]
-fn run_target_workspace_discovery() -> Result<()> {
+fn setup_target_workspace_discovery_context() -> Result<TestContext> {
     let context = uv_test::test_context!("3.12");
 
     // Create a workspace in a subdirectory.
@@ -6494,6 +6491,8 @@ fn run_target_workspace_discovery() -> Result<()> {
         [build-system]
         requires = ["uv_build>=0.7,<10000"]
         build-backend = "uv_build"
+
+        [tool.uv.workspace]
         "#
     })?;
     workspace
@@ -6509,6 +6508,15 @@ fn run_target_workspace_discovery() -> Result<()> {
         "
     })?;
 
+    Ok(context)
+}
+
+/// Test that `--preview-features target-workspace-discovery` discovers the workspace
+/// from the target's directory rather than the current working directory.
+#[test]
+fn run_target_workspace_discovery() -> Result<()> {
+    let context = setup_target_workspace_discovery_context()?;
+
     // Without the preview feature, running from the parent directory fails to find the workspace,
     // so the dependency is not installed.
     uv_snapshot!(context.filters(), context.run().arg("project/script.py").env_remove(EnvVars::VIRTUAL_ENV), @r#"
@@ -6523,8 +6531,67 @@ fn run_target_workspace_discovery() -> Result<()> {
     ModuleNotFoundError: No module named 'iniconfig'
     "#);
 
+    // Write invalid configuration files to the cwd to verify that the
+    // target-workspace-discovery feature skips parsing them.
+    context.temp_dir.child("uv.toml").write_str("bad")?;
+    context.temp_dir.child("pyproject.toml").write_str("bad")?;
+
     // With the preview feature, the workspace is discovered from the target's directory.
     uv_snapshot!(context.filters(), context.run().arg("--preview-features").arg("target-workspace-discovery").arg("project/script.py").env_remove(EnvVars::VIRTUAL_ENV), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    success
+
+    ----- stderr -----
+    Using CPython 3.12.[X] interpreter at: [PYTHON-3.12]
+    Creating virtual environment at: project/.venv
+    Resolved 2 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     + foo==1.0.0 (from file://[TEMP_DIR]/project)
+     + iniconfig==2.0.0
+    ");
+
+    Ok(())
+}
+
+/// Test that `--preview` enables target workspace discovery.
+#[test]
+fn run_target_workspace_discovery_preview_flag() -> Result<()> {
+    let context = setup_target_workspace_discovery_context()?;
+
+    context.temp_dir.child("uv.toml").write_str("bad")?;
+    context.temp_dir.child("pyproject.toml").write_str("bad")?;
+
+    uv_snapshot!(context.filters(), context.run().arg("--preview").arg("project/script.py").env_remove(EnvVars::VIRTUAL_ENV), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    success
+
+    ----- stderr -----
+    Using CPython 3.12.[X] interpreter at: [PYTHON-3.12]
+    Creating virtual environment at: project/.venv
+    Resolved 2 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     + foo==1.0.0 (from file://[TEMP_DIR]/project)
+     + iniconfig==2.0.0
+    ");
+
+    Ok(())
+}
+
+/// Test that `UV_PREVIEW=1` enables target workspace discovery.
+#[test]
+fn run_target_workspace_discovery_uv_preview_env() -> Result<()> {
+    let context = setup_target_workspace_discovery_context()?;
+
+    context.temp_dir.child("uv.toml").write_str("bad")?;
+    context.temp_dir.child("pyproject.toml").write_str("bad")?;
+
+    uv_snapshot!(context.filters(), context.run().env("UV_PREVIEW", "1").arg("project/script.py").env_remove(EnvVars::VIRTUAL_ENV), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -6566,6 +6633,31 @@ fn run_target_workspace_discovery_bare_script() -> Result<()> {
     success
 
     ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+/// `--project` should still take precedence over target workspace discovery.
+#[test]
+fn run_project_precedes_target_workspace_discovery() -> Result<()> {
+    let context = setup_target_workspace_discovery_context()?;
+    let missing_project = context.temp_dir.child("missing-project");
+
+    uv_snapshot!(context.filters(), context.run()
+        .env("UV_PREVIEW", "1")
+        .arg("--preview-features")
+        .arg("target-workspace-discovery")
+        .arg("--project")
+        .arg(missing_project.path())
+        .arg("project/script.py")
+        .env_remove(EnvVars::VIRTUAL_ENV), @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Project directory `missing-project` does not exist
     ");
 
     Ok(())
@@ -6617,46 +6709,165 @@ fn run_project_not_found_uv_preview_env() {
     ");
 }
 
-/// Using `--project` with a file path should error on Unix (it fails downstream anyway).
+/// When `--project` points to a `pyproject.toml` file, resolve to its parent directory without
+/// warning.
+///
+/// See: <https://github.com/astral-sh/uv/issues/18508>
 #[test]
-#[cfg(unix)]
-fn run_project_is_file() -> Result<()> {
+fn run_project_pyproject_toml_file() -> Result<()> {
     let context = uv_test::test_context!("3.12");
 
-    // Create a file instead of a directory.
-    let file_path = context.temp_dir.child("not-a-directory");
-    file_path.write_str("")?;
+    let project_dir = context.temp_dir.child("project");
+    project_dir.create_dir_all()?;
 
-    uv_snapshot!(context.filters(), context.run().arg("--project").arg(file_path.path()).arg("python").arg("-c").arg("print('hello')"), @"
-    success: false
-    exit_code: 2
+    let pyproject_toml = project_dir.child("pyproject.toml");
+    pyproject_toml.write_str(indoc! { r#"
+        [project]
+        name = "foo"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+        "#
+    })?;
+
+    // Passing `--project project/pyproject.toml` should resolve to the parent directory without warning.
+    uv_snapshot!(context.filters(), context.run()
+        .arg("--project")
+        .arg(project_dir.join("pyproject.toml"))
+        .env_remove(EnvVars::VIRTUAL_ENV)
+        .arg("--")
+        .arg("python")
+        .arg("--version"), @"
+    success: true
+    exit_code: 0
     ----- stdout -----
+    Python 3.12.[X]
 
     ----- stderr -----
-    error: Project path `not-a-directory` is not a directory
+    Using CPython 3.12.[X] interpreter at: [PYTHON-3.12]
+    Creating virtual environment at: project/.venv
+    Resolved 1 package in [TIME]
+    Checked in [TIME]
     ");
 
     Ok(())
 }
 
-/// Using `--project` with a file path should warn on Windows (where it's currently non-fatal).
+/// Using `--project` with a non-`pyproject.toml` file should warn.
 #[test]
-#[cfg(windows)]
-fn run_project_is_file() -> Result<()> {
+fn run_project_non_pyproject_file() -> Result<()> {
     let context = uv_test::test_context!("3.12");
 
-    // Create a file instead of a directory.
-    let file_path = context.temp_dir.child("not-a-directory");
-    file_path.write_str("")?;
+    let project_dir = context.temp_dir.child("project");
+    project_dir.create_dir_all()?;
 
-    uv_snapshot!(context.filters(), context.run().arg("--project").arg(file_path.path()).arg("python").arg("-c").arg("print('hello')"), @"
+    let pyproject_toml = project_dir.child("pyproject.toml");
+    pyproject_toml.write_str(indoc! { r#"
+        [project]
+        name = "foo"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+        "#
+    })?;
+
+    let other_file = project_dir.child("README.md");
+    other_file.write_str("")?;
+
+    uv_snapshot!(context.filters(), context.run()
+        .arg("--project")
+        .arg(other_file.path())
+        .env_remove(EnvVars::VIRTUAL_ENV)
+        .arg("--")
+        .arg("python")
+        .arg("--version"), @"
     success: true
     exit_code: 0
     ----- stdout -----
-    hello
+    Python 3.12.[X]
 
     ----- stderr -----
-    warning: Project path `not-a-directory` is not a directory. Use `--preview-features project-directory-must-exist` to error on this.
+    warning: Project path `project/README.md` is not a directory. This will become an error in a future release. Use `--preview-features project-directory-must-exist` to error on this now.
+    Using CPython 3.12.[X] interpreter at: [PYTHON-3.12]
+    Creating virtual environment at: project/.venv
+    Resolved 1 package in [TIME]
+    Checked in [TIME]
+    ");
+
+    Ok(())
+}
+
+/// Using `--project` with a nested non-`pyproject.toml` file should warn. Workspace discovery
+/// walks ancestors to find the `pyproject.toml`.
+#[test]
+fn run_project_nested_file() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let project_dir = context.temp_dir.child("project");
+    project_dir.create_dir_all()?;
+
+    let pyproject_toml = project_dir.child("pyproject.toml");
+    pyproject_toml.write_str(indoc! { r#"
+        [project]
+        name = "foo"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+        "#
+    })?;
+
+    let subdir = project_dir.child("subdir");
+    subdir.create_dir_all()?;
+    let nested_file = subdir.child("somefile");
+    nested_file.write_str("")?;
+
+    uv_snapshot!(context.filters(), context.run()
+        .arg("--project")
+        .arg(nested_file.path())
+        .env_remove(EnvVars::VIRTUAL_ENV)
+        .arg("--")
+        .arg("python")
+        .arg("--version"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Python 3.12.[X]
+
+    ----- stderr -----
+    warning: Project path `project/subdir/somefile` is not a directory. This will become an error in a future release. Use `--preview-features project-directory-must-exist` to error on this now.
+    Using CPython 3.12.[X] interpreter at: [PYTHON-3.12]
+    Creating virtual environment at: project/.venv
+    Resolved 1 package in [TIME]
+    Checked in [TIME]
+    ");
+
+    Ok(())
+}
+
+/// Using `--project` with a file that has no ancestor project should warn, then fail downstream.
+#[test]
+#[cfg(unix)]
+fn run_project_file_no_ancestor_project() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let isolated_dir = context.temp_dir.child("isolated");
+    isolated_dir.create_dir_all()?;
+    let file_path = isolated_dir.child("somefile");
+    file_path.write_str("")?;
+
+    uv_snapshot!(context.filters(), context.run()
+        .arg("--project")
+        .arg(file_path.path())
+        .arg("--")
+        .arg("python")
+        .arg("--version"), @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    warning: Project path `isolated/somefile` is not a directory. This will become an error in a future release. Use `--preview-features project-directory-must-exist` to error on this now.
+    error: failed to open file `[TEMP_DIR]/isolated/somefile/uv.toml`: Not a directory (os error 20)
     ");
 
     Ok(())

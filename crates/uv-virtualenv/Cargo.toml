@@ -1,6 +1,6 @@
 [package]
 name = "uv-virtualenv"
-version = "0.0.30"
+version = "0.0.35"
 description = "This is an internal component crate of uv"
 keywords = ["virtualenv", "venv", "python"]
 
@@ -13,6 +13,7 @@ license = { workspace = true }
 
 [lib]
 doctest = false
+test = false
 
 [lints]
 workspace = true
